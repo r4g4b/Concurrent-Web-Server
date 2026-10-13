@@ -3,6 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <sys/types.h>
 #include <sys/socket.h>
@@ -17,7 +18,22 @@ char *serve_dir;
 
 void reap_children(int sig) {
     (void) sig;
+    int saved_errno = errno;
     while (waitpid(-1, NULL, WNOHANG) > 0);
+    errno = saved_errno;
+}
+
+int write_all(int fd, const char *buf, size_t len) {
+    while (len > 0) {
+        ssize_t n = write(fd, buf, len);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        buf += n;
+        len -= n;
+    }
+    return 0;
 }
 
 const char *get_mime_type(const char *filepath) {
@@ -46,8 +62,8 @@ void send_response(int client_fd, int status_code, const char *status_text,
         "\r\n",
         status_code, status_text, content_type, body_len);
 
-    write(client_fd, header, header_len);
-    write(client_fd, body, body_len);
+    if (write_all(client_fd, header, header_len) < 0) return;
+    write_all(client_fd, body, body_len);
 }
 
 void send_404(int client_fd) {
@@ -107,12 +123,36 @@ void handle_request(int client_fd) {
     }
 
     struct stat st;
-    fstat(fd, &st);
+    if (fstat(fd, &st) < 0 || !S_ISREG(st.st_mode)) {
+        close(fd);
+        send_404(client_fd);
+        close(client_fd);
+        exit(0);
+    }
     size_t file_size = st.st_size;
 
-    char *file_buf = malloc(file_size);
-    read(fd, file_buf, file_size);
+    char *file_buf = malloc(file_size > 0 ? file_size : 1);
+    if (!file_buf) {
+        close(fd);
+        close(client_fd);
+        exit(1);
+    }
+
+    size_t total = 0;
+    while (total < file_size) {
+        ssize_t n = read(fd, file_buf + total, file_size - total);
+        if (n < 0 && errno == EINTR) continue;
+        if (n <= 0) break;
+        total += n;
+    }
     close(fd);
+
+    if (total != file_size) {
+        free(file_buf);
+        send_404(client_fd);
+        close(client_fd);
+        exit(0);
+    }
 
     send_response(client_fd, 200, "OK", get_mime_type(filepath), file_buf, file_size);
 
@@ -128,11 +168,24 @@ int main(int argc, char *argv[]) {
     }
 
     int port = atoi(argv[1]);
+    if (port <= 0 || port > 65535) {
+        fprintf(stderr, "Invalid port: %s\n", argv[1]);
+        return 1;
+    }
     serve_dir = argv[2];
 
-    signal(SIGCHLD, reap_children);
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = reap_children;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_RESTART | SA_NOCLDSTOP;
+    sigaction(SIGCHLD, &sa, NULL);
 
     int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (server_fd < 0) {
+        perror("socket");
+        return 1;
+    }
     int opt = 1;
     setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
 
@@ -142,10 +195,17 @@ int main(int argc, char *argv[]) {
     addr.sin_addr.s_addr = INADDR_ANY;
     addr.sin_port = htons(port);
 
-    bind(server_fd, (struct sockaddr *) &addr, sizeof(addr));
-    listen(server_fd, 10);
+    if (bind(server_fd, (struct sockaddr *) &addr, sizeof(addr)) < 0) {
+        perror("bind");
+        return 1;
+    }
+    if (listen(server_fd, 10) < 0) {
+        perror("listen");
+        return 1;
+    }
 
     printf("Server listening on port %d, serving: %s\n", port, serve_dir);
+    fflush(stdout);
 
     while (1) {
         int client_fd = accept(server_fd, NULL, NULL);
@@ -156,6 +216,7 @@ int main(int argc, char *argv[]) {
             close(server_fd);
             handle_request(client_fd);
         } else {
+            if (pid < 0) perror("fork");
             close(client_fd);
         }
     }

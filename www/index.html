@@ -1,8 +1,149 @@
 <!DOCTYPE html>
-<html>
-<head><title>Mini-Project 4 Test Page</title></head>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Concurrent Web Server</title>
+  <style>
+    :root {
+      --bg: #f7f7f5;
+      --card: #ffffff;
+      --text: #1f2328;
+      --muted: #5c6370;
+      --accent: #1a7f37;
+      --border: #e1e4e8;
+      --code-bg: #f0f2f4;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f1115;
+        --card: #171a21;
+        --text: #e6e8eb;
+        --muted: #9aa3ad;
+        --accent: #3fb950;
+        --border: #2a2f38;
+        --code-bg: #1f232b;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    }
+    main { max-width: 760px; margin: 0 auto; padding: 48px 16px 64px; }
+    .status {
+      display: inline-flex; align-items: center; gap: 8px;
+      font-size: 14px; color: var(--accent); font-weight: 600;
+    }
+    .dot {
+      width: 10px; height: 10px; border-radius: 50%;
+      background: var(--accent);
+      box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 20%, transparent);
+    }
+    h1 { font-size: 32px; line-height: 1.2; margin: 12px 0 8px; }
+    h2 { font-size: 20px; margin: 40px 0 12px; }
+    p { margin: 0 0 12px; }
+    .lead { color: var(--muted); font-size: 18px; }
+    section {
+      background: var(--card); border: 1px solid var(--border);
+      border-radius: 10px; padding: 20px 24px; margin-top: 16px;
+    }
+    section h2 { margin-top: 0; }
+    ul, ol { padding-left: 20px; margin: 0; }
+    li { margin-bottom: 6px; }
+    code, pre {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 14px; background: var(--code-bg); border-radius: 6px;
+    }
+    code { padding: 1px 5px; }
+    pre { padding: 14px 16px; overflow-x: auto; margin: 8px 0 0; }
+    pre code { padding: 0; background: none; }
+    table { width: 100%; border-collapse: collapse; font-size: 15px; }
+    th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top; }
+    th { color: var(--muted); font-weight: 600; }
+    footer { margin-top: 40px; color: var(--muted); font-size: 14px; }
+  </style>
+</head>
 <body>
-  <h1>Hello from the Simple Web Server</h1>
-  <p>This page is served by a fork-per-request HTTP/1.0 server written in C.</p>
+  <main>
+    <span class="status"><span class="dot"></span>Server online</span>
+    <h1>Web server is now running &hellip;</h1>
+    <p class="lead">
+      You are looking at a static page delivered by a concurrent HTTP/1.0 server
+      written from scratch in C, using nothing but raw POSIX sockets, processes and signals.
+    </p>
+
+    <section>
+      <h2>What just happened</h2>
+      <ol>
+        <li>Your browser opened a TCP connection, and the server's <code>accept()</code> call returned a new client socket.</li>
+        <li>The server called <code>fork()</code>. A child process took over your connection while the parent went straight back to accepting new clients.</li>
+        <li>The child read your request line (e.g. <code>GET / HTTP/1.1</code>) and checked that the method is <code>GET</code> and the path contains no <code>..</code>.</li>
+        <li>The path <code>/</code> was mapped to <code>index.html</code> inside the served directory, the file was opened with <code>open()</code>, sized with <code>fstat()</code> and read into memory.</li>
+        <li>The child wrote back an <code>HTTP/1.0 200 OK</code> header with the right <code>Content-Type</code> and <code>Content-Length</code>, followed by this file, then closed the socket and exited.</li>
+        <li>The parent's <code>SIGCHLD</code> handler reaped the finished child with <code>waitpid(-1, NULL, WNOHANG)</code>, so no zombie processes pile up.</li>
+      </ol>
+    </section>
+
+    <section>
+      <h2>Features</h2>
+      <ul>
+        <li><strong>Fork-per-request concurrency:</strong> every connection runs in its own process, so a slow or crashing request can't affect others.</li>
+        <li><strong>Zombie-free:</strong> terminated children are cleaned up asynchronously by a signal handler.</li>
+        <li><strong>Static file serving:</strong> HTML, CSS, JavaScript, images and plain text from any directory you choose.</li>
+        <li><strong>MIME detection:</strong> <code>Content-Type</code> is inferred from the file extension, falling back to <code>application/octet-stream</code>.</li>
+        <li><strong>Directory traversal protection:</strong> any URL containing <code>..</code> is rejected before the filesystem is touched.</li>
+        <li><strong>Error handling:</strong> <code>404 Not Found</code> for missing files and <code>405 Method Not Allowed</code> for anything other than <code>GET</code>.</li>
+        <li><strong>Fast restarts:</strong> <code>SO_REUSEADDR</code> lets the server rebind its port immediately after being stopped.</li>
+      </ul>
+    </section>
+
+    <section>
+      <h2>Responses you can trigger</h2>
+      <table>
+        <thead><tr><th>Request</th><th>Response</th></tr></thead>
+        <tbody>
+          <tr><td><code>GET /</code> or <code>GET /index.html</code></td><td><code>200 OK</code> &mdash; this page</td></tr>
+          <tr><td><code>GET /missing.html</code></td><td><code>404 Not Found</code></td></tr>
+          <tr><td><code>GET /../etc/passwd</code></td><td><code>404 Not Found</code> (traversal blocked)</td></tr>
+          <tr><td><code>POST /</code></td><td><code>405 Method Not Allowed</code></td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section>
+      <h2>Try it from a terminal</h2>
+      <pre><code># Build and start the server on port 8080, serving ./www
+gcc -o server server.c
+./server 8080 ./www
+
+# Inspect the response headers
+curl -v http://localhost:8080/ -o /dev/null
+
+# Error cases
+curl http://localhost:8080/missing.html
+curl --path-as-is http://localhost:8080/../etc/passwd
+curl -X POST http://localhost:8080/
+
+# Several concurrent requests, each handled by its own process
+for i in 1 2 3; do curl -s http://localhost:8080/ -o /dev/null &amp; done; wait</code></pre>
+    </section>
+
+    <section>
+      <h2>Why fork()?</h2>
+      <p>
+        Forking gives each request a separate address space, which is the simplest way to get
+        strong isolation. The cost is higher per-connection overhead than threads or a thread pool,
+        which production servers use instead. This project trades raw performance for clarity:
+        it shows exactly how sockets, processes, file I/O and signals fit together.
+      </p>
+    </section>
+
+    <footer>
+      Served by <code>server.c</code> &middot; HTTP/1.0 &middot; one process per connection
+    </footer>
+  </main>
 </body>
 </html>
